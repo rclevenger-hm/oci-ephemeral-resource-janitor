@@ -22,7 +22,10 @@ def _read_payload(data: io.BytesIO) -> Dict[str, Any]:
     if not raw:
         return {}
 
-    return json.loads(raw.decode("utf-8"))
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object")
+    return payload
 
 
 def _build_response(ctx, body: Dict[str, Any], status_code: int = 200):
@@ -44,22 +47,24 @@ def handler(ctx, data: io.BytesIO = None):
     try:
         payload = _read_payload(data)
         config = cleanup_resources.load_config(payload)
-        terminated_count = cleanup_resources.handle_cleanup(config)
+        report = cleanup_resources.run_janitor(config)
         return _build_response(
             ctx,
             {
                 "status": "ok",
-                "dry_run": config.dry_run,
-                "compartment_id": config.compartment_id,
-                "threshold_hours": config.threshold_hours,
-                "required_tag_key": config.required_tag_key,
-                "required_tag_value": config.required_tag_value,
-                "candidate_count": terminated_count,
+                "action": report["action"],
+                "dry_run": report["dry_run"],
+                "compartment_id": report["compartment_id"],
+                "scanned_count": report["scanned_count"],
+                "candidate_count": report["candidate_count"],
+                "selected_count": report["selected_count"],
+                "limited": report["limited"],
+                "reason_counts": report["reason_counts"],
             },
         )
-    except KeyError as exc:
-        LOGGER.error("Missing required configuration: %s", exc)
-        return _build_response(ctx, {"status": "error", "message": f"Missing configuration: {exc}"}, 400)
+    except (KeyError, ValueError) as exc:
+        LOGGER.error("Invalid janitor configuration: %s", exc)
+        return _build_response(ctx, {"status": "error", "message": str(exc)}, 400)
     except Exception as exc:  # pragma: no cover - exercised in runtime integration
         LOGGER.exception("Function invocation failed")
         return _build_response(ctx, {"status": "error", "message": str(exc)}, 500)
