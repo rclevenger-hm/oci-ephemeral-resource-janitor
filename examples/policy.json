@@ -1,0 +1,16 @@
+{
+  "compartment_id": "ocid1.compartment.oc1..exampleuniqueID",
+  "threshold_hours": 72,
+  "dry_run": true,
+  "action": "report",
+  "max_actions_per_run": 10,
+  "required_tag_key": "JanitorManaged",
+  "required_tag_value": "true",
+  "excluded_tag_key": "DoNotCleanup",
+  "excluded_tag_value": "true",
+  "ttl_tag_key": "TTLHours",
+  "expires_at_tag_key": "ExpiresAt",
+  "allow_terminate": false,
+  "termination_requires_stopped": true,
+  "auth_mode": "resource_principal"
+}
