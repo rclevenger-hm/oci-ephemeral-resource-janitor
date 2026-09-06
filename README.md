@@ -1,127 +1,228 @@
-# OCI Automated Resource Cleanup
+# OCI Ephemeral Resource Janitor
 
-Safe-by-default cleanup automation for Oracle Cloud Infrastructure. This project finds OCI compute instances that match explicit cleanup policy rules and then either reports them, stops them, or terminates them.
+Safety-first lifecycle enforcement for temporary Oracle Cloud Infrastructure resources.
 
-The repository supports two execution modes:
+The janitor is designed for infrastructure that is **supposed to expire**: developer sandboxes, CI workers, QA machines, demos, experiments, short-lived troubleshooting hosts, and other ephemeral workloads. It evaluates explicit lifecycle policy and can report, stop, or terminate resources after their intended lifetime.
 
-- Local or scheduled Python execution
-- OCI Functions deployment via the `function/` directory
+> **Current resource support:** OCI Compute instances. The policy and reporting model is intentionally generic so additional ephemeral OCI resource types can be added without turning the project into an indiscriminate "delete old things" script.
 
-## Why This Exists
+## Purpose
 
-Cloud cleanup scripts are easy to get wrong. A simple "delete anything older than 24 hours" rule is risky, especially in shared or long-lived environments.
+The project answers one operational question:
 
-This project adds guardrails around cleanup actions:
+> **Which explicitly managed temporary resources have expired, and what lifecycle action should be taken safely?**
 
-- Dry-run mode is the default
-- Instances can require an opt-in tag
-- Instances can be protected by an exclusion tag
-- A per-run action cap limits blast radius
-- Every evaluated instance can be recorded in a structured report
-- A safer `stop` action is available before full termination
+It is not an idle-resource detector and it is not a general-purpose OCI cost optimizer. CPU, network, and other utilization metrics are not currently used to infer whether a resource is safe to remove.
 
-## Current Behavior
+## Safety Model
 
-The cleanup policy currently targets OCI compute instances that are:
+The defaults are deliberately conservative:
 
-- In the `RUNNING` lifecycle state
-- Older than a configured age threshold
-- Optionally marked with a required freeform tag such as `AutoCleanup=true`
-- Not marked with an exclusion tag such as `DoNotCleanup=true`
+1. **Explicit opt-in is mandatory.** A resource is ignored unless it has `JanitorManaged=true` (configurable key/value).
+2. **Dry-run is enabled by default.**
+3. **`stop` is the default action**, not termination.
+4. **Only 10 resources are selected per run by default** to cap blast radius.
+5. **`DoNotCleanup=true` always protects a managed resource** by default.
+6. **Termination has a second interlock.** Live termination requires `dry_run=false`, `action=terminate`, and `allow_terminate=true`.
+7. **Termination is two-phase by default.** Only already-`STOPPED` instances are eligible for termination unless `termination_requires_stopped=false` is explicitly configured.
+8. **Malformed lifecycle tags fail closed.** Invalid TTL or expiration values make a resource ineligible rather than guessing.
+9. Every evaluated resource can be emitted in a structured JSON audit report with its eligibility reason.
 
-Important: this is still policy-driven cleanup, not true idle detection. The project does not yet use OCI Monitoring metrics like CPU or network utilization to decide whether an instance is idle.
+A typical production pattern is therefore:
 
-## Repository Layout
+```text
+JanitorManaged=true
+        |
+        v
+    expiration reached
+        |
+        v
+   report / dry-run
+        |
+        v
+       stop
+        |
+        v
+ terminate on a later run
+```
 
-- `function/cleanup_resources.py`: shared cleanup logic, config loading, policy evaluation, reporting, and action execution
-- `function/handler.py`: OCI Functions entrypoint
-- `function/func.yaml`: OCI Functions manifest
-- `function/test_cleanup_resources.py`: unit tests for cleanup policy and execution behavior
+## Lifecycle Tags
 
-## Features
+Freeform tags provide per-resource policy.
 
-- Pagination-aware OCI instance discovery
-- Dry-run by default
-- Required-tag opt-in
-- Exclusion-tag protection
-- `terminate` and `stop` cleanup actions
-- Per-run processing cap
-- JSON policy file support
-- Structured JSON report output
-- OCI config-file auth and OCI resource principal auth support
+| Tag | Default meaning |
+| --- | --- |
+| `JanitorManaged=true` | Explicitly opts the resource into janitor management. Required. |
+| `DoNotCleanup=true` | Protects the resource from janitor actions. |
+| `TTLHours=<number>` | Overrides the global TTL for this resource. |
+| `ExpiresAt=<ISO-8601>` | Sets an absolute expiration time and takes precedence over `TTLHours`. |
+
+Examples:
+
+```text
+JanitorManaged=true
+TTLHours=8
+```
+
+A short-lived CI worker expires eight hours after instance creation.
+
+```text
+JanitorManaged=true
+ExpiresAt=2026-09-08T18:00:00Z
+```
+
+A demo instance expires at an explicit deadline.
+
+```text
+JanitorManaged=true
+TTLHours=24
+DoNotCleanup=true
+```
+
+The instance remains protected regardless of age until the exclusion tag is removed.
+
+## Eligibility Rules
+
+For each OCI Compute instance in the configured compartment, the janitor:
+
+1. checks whether the lifecycle state is actionable for the configured action;
+2. requires the opt-in management tag;
+3. checks the exclusion tag;
+4. resolves expiration from `ExpiresAt`, then `TTLHours`, then the global threshold;
+5. rejects malformed expiration policy;
+6. marks the instance eligible only after expiration.
+
+Actionable states differ by lifecycle action:
+
+- `report`: expired `RUNNING` and `STOPPED` managed instances can be surfaced;
+- `stop`: only expired `RUNNING` managed instances are eligible;
+- `terminate`: only expired `STOPPED` managed instances are eligible by default.
+
+Direct termination of running instances can be enabled, but it requires an explicit policy override in addition to the live-termination interlock.
+
+## Structured Reporting
+
+Each run produces a report containing:
+
+- schema version and generation timestamp;
+- action and dry-run state;
+- target compartment;
+- supported resource types evaluated;
+- scanned, eligible, and selected counts;
+- whether the run was limited by the action cap;
+- counts grouped by decision reason;
+- one decision record per evaluated resource.
+
+Typical decision reasons include:
+
+- `expired`
+- `not_expired`
+- `required_tag_missing`
+- `excluded_tag_present`
+- `invalid_ttl_tag`
+- `invalid_expiration_tag`
+- `lifecycle_state_not_actionable`
+
+This makes dry-runs useful as audit output rather than simply logging "would delete" messages.
 
 ## Configuration
 
-The cleanup logic can be configured with environment variables, an optional JSON policy file, or a request payload when invoked as an OCI Function.
+Configuration can come from environment variables, a JSON policy file, or an OCI Function request payload. Request values override environment values, and environment values override policy-file defaults.
 
-### Environment Variables
+### Primary environment variables
 
-- `OCI_COMPARTMENT_ID` required. Target compartment OCID.
-- `OCI_CLEANUP_THRESHOLD_HOURS` optional. Minimum resource age before it becomes eligible. Default: `24`.
-- `OCI_CLEANUP_DRY_RUN` optional. Default: `true`.
-- `OCI_CLEANUP_ACTION` optional. `terminate` by default. Set to `stop` for quarantine-style runs.
-- `OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN` optional. Maximum number of eligible resources to process in a single run.
-- `OCI_CLEANUP_REQUIRED_TAG_KEY` optional. Freeform tag key that must exist for a resource to be eligible.
-- `OCI_CLEANUP_REQUIRED_TAG_VALUE` optional. If set, the required tag must match this value exactly.
-- `OCI_CLEANUP_EXCLUDED_TAG_KEY` optional. Freeform tag key that protects a resource from cleanup.
-- `OCI_CLEANUP_EXCLUDED_TAG_VALUE` optional. If set, the exclusion tag must match this value exactly.
-- `OCI_CLEANUP_REPORT_FILE` optional. Writes a JSON report to this path after a run.
-- `OCI_CLEANUP_POLICY_FILE` optional. Path to a JSON file containing cleanup defaults.
-- `OCI_AUTH_MODE` optional. `auto` by default. Valid values are `auto`, `config`, and `resource_principal`.
-- `OCI_CONFIG_FILE` optional. OCI config file path for local execution.
-- `OCI_CONFIG_PROFILE` optional. OCI config profile name. Default: `DEFAULT`.
-- `LOG_LEVEL` optional. Default: `INFO`.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OCI_COMPARTMENT_ID` | required | OCI compartment to evaluate. |
+| `OCI_JANITOR_THRESHOLD_HOURS` | `24` | Global TTL when no resource-specific tag is present. |
+| `OCI_JANITOR_DRY_RUN` | `true` | Prevents mutations. |
+| `OCI_JANITOR_ACTION` | `stop` | `report`, `stop`, or `terminate`. |
+| `OCI_JANITOR_MAX_ACTIONS_PER_RUN` | `10` | Blast-radius cap. |
+| `OCI_JANITOR_REQUIRED_TAG_KEY` | `JanitorManaged` | Required opt-in tag key. |
+| `OCI_JANITOR_REQUIRED_TAG_VALUE` | `true` | Required opt-in tag value. |
+| `OCI_JANITOR_EXCLUDED_TAG_KEY` | `DoNotCleanup` | Protection tag key. |
+| `OCI_JANITOR_EXCLUDED_TAG_VALUE` | `true` | Protection tag value. |
+| `OCI_JANITOR_TTL_TAG_KEY` | `TTLHours` | Per-resource TTL tag. |
+| `OCI_JANITOR_EXPIRES_AT_TAG_KEY` | `ExpiresAt` | Absolute expiration tag. |
+| `OCI_JANITOR_ALLOW_TERMINATE` | `false` | Required second interlock for live termination. |
+| `OCI_JANITOR_TERMINATION_REQUIRES_STOPPED` | `true` | Enforces two-phase stop-then-terminate behavior. |
+| `OCI_JANITOR_REPORT_FILE` | unset | Optional path for the structured JSON report. |
+| `OCI_JANITOR_POLICY_FILE` | unset | Optional JSON policy file. |
+| `OCI_AUTH_MODE` | `auto` | `auto`, `config`, or `resource_principal`. |
+| `OCI_CONFIG_FILE` | OCI SDK default | Local OCI config path. |
+| `OCI_CONFIG_PROFILE` | `DEFAULT` | OCI config profile. |
+| `LOG_LEVEL` | `INFO` | Python logging level. |
 
-### Policy File Example
+Legacy `OCI_CLEANUP_*` environment variables from the previous project name remain supported where there is a direct equivalent.
+
+## Policy File
+
+See [`examples/policy.json`](examples/policy.json).
 
 ```json
 {
   "compartment_id": "ocid1.compartment.oc1..exampleuniqueID",
   "threshold_hours": 72,
   "dry_run": true,
-  "action": "stop",
-  "max_terminations_per_run": 5,
-  "required_tag_key": "AutoCleanup",
+  "action": "report",
+  "max_actions_per_run": 10,
+  "required_tag_key": "JanitorManaged",
   "required_tag_value": "true",
   "excluded_tag_key": "DoNotCleanup",
   "excluded_tag_value": "true",
-  "report_file": "cleanup-report.json",
+  "ttl_tag_key": "TTLHours",
+  "expires_at_tag_key": "ExpiresAt",
+  "allow_terminate": false,
+  "termination_requires_stopped": true,
   "auth_mode": "resource_principal"
 }
 ```
 
-## Install
+## Run Locally
+
+Install dependencies:
 
 ```bash
 pip install -r function/requirements.txt
 ```
 
-## Run Locally
+Start with a report-only dry run:
 
-Example dry run on Windows PowerShell:
-
-```powershell
-$env:OCI_COMPARTMENT_ID = "ocid1.compartment.oc1..exampleuniqueID"
-$env:OCI_CLEANUP_REQUIRED_TAG_KEY = "AutoCleanup"
-$env:OCI_CLEANUP_REQUIRED_TAG_VALUE = "true"
-$env:OCI_CLEANUP_EXCLUDED_TAG_KEY = "DoNotCleanup"
-$env:OCI_CLEANUP_EXCLUDED_TAG_VALUE = "true"
-$env:OCI_CLEANUP_ACTION = "stop"
+```bash
+export OCI_COMPARTMENT_ID='ocid1.compartment.oc1..exampleuniqueID'
+export OCI_JANITOR_ACTION='report'
+export OCI_JANITOR_DRY_RUN='true'
 python function/cleanup_resources.py
 ```
 
-Example real termination run:
+Stop expired managed instances:
 
-```powershell
-$env:OCI_COMPARTMENT_ID = "ocid1.compartment.oc1..exampleuniqueID"
-$env:OCI_CLEANUP_REQUIRED_TAG_KEY = "AutoCleanup"
-$env:OCI_CLEANUP_REQUIRED_TAG_VALUE = "true"
-$env:OCI_CLEANUP_DRY_RUN = "false"
-$env:OCI_CLEANUP_ACTION = "terminate"
+```bash
+export OCI_COMPARTMENT_ID='ocid1.compartment.oc1..exampleuniqueID'
+export OCI_JANITOR_ACTION='stop'
+export OCI_JANITOR_DRY_RUN='false'
 python function/cleanup_resources.py
 ```
 
-## Deploy As An OCI Function
+Terminate expired instances that are already stopped:
+
+```bash
+export OCI_COMPARTMENT_ID='ocid1.compartment.oc1..exampleuniqueID'
+export OCI_JANITOR_ACTION='terminate'
+export OCI_JANITOR_DRY_RUN='false'
+export OCI_JANITOR_ALLOW_TERMINATE='true'
+python function/cleanup_resources.py
+```
+
+Direct termination of an expired running instance requires one additional explicit override:
+
+```bash
+export OCI_JANITOR_TERMINATION_REQUIRES_STOPPED='false'
+```
+
+That mode is intentionally not the default.
+
+## Deploy as an OCI Function
 
 From the `function/` directory:
 
@@ -129,82 +230,63 @@ From the `function/` directory:
 fn -v deploy --app <your_fn_app_name>
 ```
 
-For OCI Functions, prefer resource principals:
+For OCI Functions, resource principals are recommended:
 
 ```bash
-fn config function <your_fn_app_name> oci-automated-resource-cleanup OCI_AUTH_MODE resource_principal
+fn config function <your_fn_app_name> oci-ephemeral-resource-janitor OCI_AUTH_MODE resource_principal
 ```
 
-You will typically also set function configuration values for:
+Then configure the janitor policy on the Function/application and grant the resource principal the least privilege needed to list instances and perform only the actions you enable.
 
-- `OCI_COMPARTMENT_ID`
-- `OCI_CLEANUP_THRESHOLD_HOURS`
-- `OCI_CLEANUP_DRY_RUN`
-- `OCI_CLEANUP_ACTION`
-- `OCI_CLEANUP_REQUIRED_TAG_KEY`
-- `OCI_CLEANUP_REQUIRED_TAG_VALUE`
-- `OCI_CLEANUP_EXCLUDED_TAG_KEY`
-- `OCI_CLEANUP_EXCLUDED_TAG_VALUE`
-- `OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN`
-- `LOG_LEVEL`
-
-## Invoke The OCI Function
-
-The function accepts an optional JSON body. Request values override defaults from the environment or policy file for that invocation.
-
-Supported request fields:
-
-- `compartment_id`
-- `threshold_hours`
-- `dry_run`
-- `action`
-- `max_terminations_per_run`
-- `required_tag_key`
-- `required_tag_value`
-- `excluded_tag_key`
-- `excluded_tag_value`
-- `report_file`
-- `policy_file`
-- `auth_mode`
-- `config_path`
-- `config_profile`
-
-Example request body:
+The function accepts the same lower-case policy fields as a JSON request body, for example:
 
 ```json
 {
   "compartment_id": "ocid1.compartment.oc1..exampleuniqueID",
-  "threshold_hours": 72,
+  "action": "report",
   "dry_run": true,
-  "action": "stop",
-  "required_tag_key": "AutoCleanup",
-  "required_tag_value": "true",
-  "excluded_tag_key": "DoNotCleanup",
-  "excluded_tag_value": "true",
-  "max_terminations_per_run": 5
+  "threshold_hours": 72,
+  "max_actions_per_run": 5
 }
 ```
+
+The response includes scanned, eligible, selected, limited, and reason-count summaries.
 
 ## Tests
 
 ```bash
 cd function
-python -m unittest test_cleanup_resources.py
+python -m unittest discover -v -p 'test_*.py'
 ```
 
-## Known Limitations
+The test suite covers policy precedence, opt-in safety, exclusion behavior, per-resource TTLs, absolute expiration, malformed-tag fail-closed behavior, action caps, reporting, destructive-action interlocks, two-phase termination, CLI exit semantics, and the OCI Function handler.
 
-- Cleanup eligibility is still based on age and tag policy, not OCI utilization metrics
-- Only compute instances are supported today
-- Reports are written locally; there is no Object Storage or Notifications integration yet
+## Repository Layout
 
-## Recommended Next Steps
+```text
+.github/workflows/test.yml       CI for Python 3.11 and 3.12
+examples/policy.json             Safe example policy
+function/cleanup_resources.py    Policy engine, OCI discovery, actions, reporting
+function/handler.py              OCI Functions entrypoint
+function/func.yaml               OCI Functions manifest
+function/test_cleanup_resources.py
+function/test_handler.py
+```
 
-- Add OCI Monitoring-based idle detection
-- Support more OCI resource types
-- Publish reports to OCI Object Storage or OCI Logging
-- Add notifications for non-dry-run executions and failures
+## Current Scope and Roadmap
+
+Today the janitor supports OCI Compute instances. Natural extensions are other resource types that have a defensible ephemeral lifecycle, such as:
+
+- unattached ephemeral block or boot volumes;
+- temporary public IPs;
+- short-lived snapshots or custom images;
+- ephemeral load balancers or test-network resources;
+- report publication to Object Storage / OCI Logging;
+- Notifications integration for action summaries and failures;
+- optional OCI Monitoring signals as an additional safety condition, never as a replacement for explicit ownership policy.
+
+Any additional resource handler should preserve the same design principle: **the janitor only manages resources that have explicitly opted into lifecycle management.**
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT. See [LICENSE](LICENSE).
