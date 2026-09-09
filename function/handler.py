@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover - only needed in OCI Functions r
 
 
 LOGGER = logging.getLogger(__name__)
+MAX_REQUEST_BYTES = 64 * 1024
 
 
 def _read_payload(data: io.BytesIO) -> Dict[str, Any]:
@@ -21,6 +22,8 @@ def _read_payload(data: io.BytesIO) -> Dict[str, Any]:
     raw = data.getvalue()
     if not raw:
         return {}
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ValueError(f"Request body exceeds {MAX_REQUEST_BYTES} byte limit")
 
     payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
@@ -62,9 +65,9 @@ def handler(ctx, data: io.BytesIO = None):
                 "reason_counts": report["reason_counts"],
             },
         )
-    except (KeyError, ValueError) as exc:
+    except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         LOGGER.error("Invalid janitor configuration: %s", exc)
         return _build_response(ctx, {"status": "error", "message": str(exc)}, 400)
-    except Exception as exc:  # pragma: no cover - exercised in runtime integration
+    except Exception:  # pragma: no cover - exercised in runtime integration
         LOGGER.exception("Function invocation failed")
-        return _build_response(ctx, {"status": "error", "message": str(exc)}, 500)
+        return _build_response(ctx, {"status": "error", "message": "internal error"}, 500)
