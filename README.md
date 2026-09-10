@@ -123,7 +123,7 @@ Typical decision reasons include:
 - `invalid_expiration_tag`
 - `lifecycle_state_not_actionable`
 
-This makes dry-runs useful as audit output rather than simply logging "would delete" messages.
+This makes dry-runs useful as audit output rather than simply logging "would delete" messages. See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the run-level metrics, alerting, dashboard, and incident-triage contract built around this report schema.
 
 ## Configuration
 
