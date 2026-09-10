@@ -468,12 +468,19 @@ def execute_cleanup_action(
     raise ValueError(f"Unsupported janitor action: {action}")
 
 
+def _candidate_sort_key(decision: CleanupDecision) -> tuple[bool, str, str]:
+    return (decision.expires_at is None, decision.expires_at or "", decision.resource_id)
+
+
 def run_janitor(config: Optional[JanitorConfig] = None) -> dict[str, Any]:
     active_config = config or load_config_from_env()
     validate_config(active_config)
     compute_client = get_compute_client(active_config)
     decisions = get_cleanup_decisions(compute_client, active_config)
-    candidates = [decision for decision in decisions if decision.eligible]
+    candidates = sorted(
+        (decision for decision in decisions if decision.eligible),
+        key=_candidate_sort_key,
+    )
     candidate_count = len(candidates)
 
     selected = candidates
