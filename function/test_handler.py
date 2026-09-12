@@ -17,9 +17,10 @@ class HandlerTests(unittest.TestCase):
         body = json.loads(result["body"])
         self.assertIn("exceeds", body["message"])
 
+    @patch.object(handler.LOGGER, "info")
     @patch("handler.cleanup_resources.run_janitor")
     @patch("handler.cleanup_resources.load_config")
-    def test_returns_run_summary(self, mock_load_config, mock_run_janitor):
+    def test_returns_run_summary_and_logs_completion(self, mock_load_config, mock_run_janitor, mock_log_info):
         mock_load_config.return_value = object()
         mock_run_janitor.return_value = {
             "action": "report",
@@ -36,6 +37,15 @@ class HandlerTests(unittest.TestCase):
         body = json.loads(result["body"])
         self.assertEqual(body["candidate_count"], 2)
         self.assertEqual(body["reason_counts"]["required_tag_missing"], 8)
+        mock_log_info.assert_called_once_with(
+            "Janitor run completed scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
+            10,
+            2,
+            2,
+            "report",
+            True,
+            False,
+        )
 
     @patch("handler.cleanup_resources.run_janitor", side_effect=RuntimeError("internal tenancy detail"))
     @patch("handler.cleanup_resources.load_config", return_value=object())
