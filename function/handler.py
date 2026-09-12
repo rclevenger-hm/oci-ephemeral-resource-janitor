@@ -51,6 +51,15 @@ def handler(ctx, data: io.BytesIO = None):
         payload = _read_payload(data)
         config = cleanup_resources.load_config(payload)
         report = cleanup_resources.run_janitor(config)
+        LOGGER.info(
+            "Janitor run completed scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
+            report["scanned_count"],
+            report["candidate_count"],
+            report["selected_count"],
+            report["action"],
+            report["dry_run"],
+            report["limited"],
+        )
         return _build_response(
             ctx,
             {
