@@ -1,7 +1,7 @@
 import io
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import cleanup_resources
 
@@ -31,6 +31,23 @@ def _read_payload(data: io.BytesIO) -> Dict[str, Any]:
     return payload
 
 
+def _request_id(ctx) -> Optional[str]:
+    call_id = getattr(ctx, "CallID", None)
+    if not callable(call_id):
+        return None
+    try:
+        value = call_id()
+    except Exception:  # pragma: no cover - runtime context implementations vary
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _correlated_body(body: Dict[str, Any], request_id: Optional[str]) -> Dict[str, Any]:
+    if not request_id:
+        return body
+    return {**body, "request_id": request_id}
+
+
 def _build_response(ctx, body: Dict[str, Any], status_code: int = 200):
     payload = json.dumps(body)
     if response is None:
@@ -46,13 +63,15 @@ def _build_response(ctx, body: Dict[str, Any], status_code: int = 200):
 
 def handler(ctx, data: io.BytesIO = None):
     logging.basicConfig(level="INFO")
+    request_id = _request_id(ctx)
 
     try:
         payload = _read_payload(data)
         config = cleanup_resources.load_config(payload)
         report = cleanup_resources.run_janitor(config)
         LOGGER.info(
-            "Janitor run completed scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
+            "Janitor run completed request_id=%s scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
+            request_id,
             report["scanned_count"],
             report["candidate_count"],
             report["selected_count"],
@@ -62,21 +81,32 @@ def handler(ctx, data: io.BytesIO = None):
         )
         return _build_response(
             ctx,
-            {
-                "status": "ok",
-                "action": report["action"],
-                "dry_run": report["dry_run"],
-                "compartment_id": report["compartment_id"],
-                "scanned_count": report["scanned_count"],
-                "candidate_count": report["candidate_count"],
-                "selected_count": report["selected_count"],
-                "limited": report["limited"],
-                "reason_counts": report["reason_counts"],
-            },
+            _correlated_body(
+                {
+                    "status": "ok",
+                    "action": report["action"],
+                    "dry_run": report["dry_run"],
+                    "compartment_id": report["compartment_id"],
+                    "scanned_count": report["scanned_count"],
+                    "candidate_count": report["candidate_count"],
+                    "selected_count": report["selected_count"],
+                    "limited": report["limited"],
+                    "reason_counts": report["reason_counts"],
+                },
+                request_id,
+            ),
         )
     except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        LOGGER.error("Invalid janitor configuration: %s", exc)
-        return _build_response(ctx, {"status": "error", "message": str(exc)}, 400)
+        LOGGER.error("Invalid janitor configuration request_id=%s: %s", request_id, exc)
+        return _build_response(
+            ctx,
+            _correlated_body({"status": "error", "message": str(exc)}, request_id),
+            400,
+        )
     except Exception:  # pragma: no cover - exercised in runtime integration
-        LOGGER.exception("Function invocation failed")
-        return _build_response(ctx, {"status": "error", "message": "internal error"}, 500)
+        LOGGER.exception("Function invocation failed request_id=%s", request_id)
+        return _build_response(
+            ctx,
+            _correlated_body({"status": "error", "message": "internal error"}, request_id),
+            500,
+        )
