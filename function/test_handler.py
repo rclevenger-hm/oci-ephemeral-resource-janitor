@@ -6,6 +6,14 @@ from unittest.mock import patch
 import handler
 
 
+class FunctionContext:
+    def __init__(self, call_id):
+        self._call_id = call_id
+
+    def CallID(self):
+        return self._call_id
+
+
 class HandlerTests(unittest.TestCase):
     def test_rejects_non_object_json(self):
         result = handler.handler(None, io.BytesIO(b"[]"))
@@ -32,13 +40,15 @@ class HandlerTests(unittest.TestCase):
             "limited": False,
             "reason_counts": {"expired": 2, "required_tag_missing": 8},
         }
-        result = handler.handler(None, io.BytesIO(b"{}"))
+        result = handler.handler(FunctionContext("call-123"), io.BytesIO(b"{}"))
         self.assertEqual(result["status_code"], 200)
         body = json.loads(result["body"])
         self.assertEqual(body["candidate_count"], 2)
         self.assertEqual(body["reason_counts"]["required_tag_missing"], 8)
+        self.assertEqual(body["request_id"], "call-123")
         mock_log_info.assert_called_once_with(
-            "Janitor run completed scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
+            "Janitor run completed request_id=%s scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
+            "call-123",
             10,
             2,
             2,
@@ -47,13 +57,19 @@ class HandlerTests(unittest.TestCase):
             False,
         )
 
+    def test_client_error_includes_function_request_id(self):
+        result = handler.handler(FunctionContext("call-invalid"), io.BytesIO(b"[]"))
+        self.assertEqual(result["status_code"], 400)
+        body = json.loads(result["body"])
+        self.assertEqual(body["request_id"], "call-invalid")
+
     @patch("handler.cleanup_resources.run_janitor", side_effect=RuntimeError("internal tenancy detail"))
     @patch("handler.cleanup_resources.load_config", return_value=object())
     def test_internal_failure_does_not_leak_exception_detail(self, mock_load_config, mock_run_janitor):
-        result = handler.handler(None, io.BytesIO(b"{}"))
+        result = handler.handler(FunctionContext("call-error"), io.BytesIO(b"{}"))
         self.assertEqual(result["status_code"], 500)
         body = json.loads(result["body"])
-        self.assertEqual(body, {"status": "error", "message": "internal error"})
+        self.assertEqual(body, {"status": "error", "message": "internal error", "request_id": "call-error"})
 
 
 if __name__ == "__main__":
