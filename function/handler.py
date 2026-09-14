@@ -13,6 +13,13 @@ except ModuleNotFoundError:  # pragma: no cover - only needed in OCI Functions r
 
 LOGGER = logging.getLogger(__name__)
 MAX_REQUEST_BYTES = 64 * 1024
+PROTECTED_RUNTIME_KEYS = {
+    "auth_mode",
+    "config_path",
+    "config_profile",
+    "policy_file",
+    "report_file",
+}
 
 
 def _read_payload(data: io.BytesIO) -> Dict[str, Any]:
@@ -28,6 +35,12 @@ def _read_payload(data: io.BytesIO) -> Dict[str, Any]:
     payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Request body must be a JSON object")
+
+    protected = sorted(PROTECTED_RUNTIME_KEYS.intersection(payload))
+    if protected:
+        raise ValueError(
+            "Request body cannot override function runtime settings: " + ", ".join(protected)
+        )
     return payload
 
 
