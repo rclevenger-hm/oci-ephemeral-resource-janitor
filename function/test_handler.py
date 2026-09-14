@@ -25,6 +25,15 @@ class HandlerTests(unittest.TestCase):
         body = json.loads(result["body"])
         self.assertIn("exceeds", body["message"])
 
+    def test_rejects_request_level_runtime_overrides(self):
+        for key in sorted(handler.PROTECTED_RUNTIME_KEYS):
+            with self.subTest(key=key):
+                result = handler.handler(None, io.BytesIO(json.dumps({key: "override"}).encode("utf-8")))
+                self.assertEqual(result["status_code"], 400)
+                body = json.loads(result["body"])
+                self.assertIn(key, body["message"])
+                self.assertIn("runtime settings", body["message"])
+
     @patch.object(handler.LOGGER, "info")
     @patch("handler.cleanup_resources.run_janitor")
     @patch("handler.cleanup_resources.load_config")
