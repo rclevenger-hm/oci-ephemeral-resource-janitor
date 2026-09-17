@@ -110,14 +110,21 @@ def handler(ctx, data: io.BytesIO = None):
             ),
         )
     except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        LOGGER.error("Invalid janitor configuration request_id=%s: %s", request_id, exc)
+        LOGGER.error(
+            "Janitor run failed request_id=%s failure_category=configuration: %s",
+            request_id,
+            exc,
+        )
         return _build_response(
             ctx,
             _correlated_body({"status": "error", "message": str(exc)}, request_id),
             400,
         )
     except Exception:  # pragma: no cover - exercised in runtime integration
-        LOGGER.exception("Function invocation failed request_id=%s", request_id)
+        LOGGER.exception(
+            "Janitor run failed request_id=%s failure_category=runtime",
+            request_id,
+        )
         return _build_response(
             ctx,
             _correlated_body({"status": "error", "message": "internal error"}, request_id),
