@@ -1,0 +1,4 @@
+# Keep this directory available for local OCI SDK configuration without
+# allowing credentials, private-key paths, or working profiles into Git.
+*
+!.gitignore
