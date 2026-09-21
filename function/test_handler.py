@@ -66,19 +66,32 @@ class HandlerTests(unittest.TestCase):
             False,
         )
 
-    def test_client_error_includes_function_request_id(self):
+    @patch.object(handler.LOGGER, "error")
+    def test_client_error_includes_request_id_and_failure_category(self, mock_log_error):
         result = handler.handler(FunctionContext("call-invalid"), io.BytesIO(b"[]"))
         self.assertEqual(result["status_code"], 400)
         body = json.loads(result["body"])
         self.assertEqual(body["request_id"], "call-invalid")
+        self.assertEqual(mock_log_error.call_args.args[0], "Janitor run failed request_id=%s failure_category=configuration: %s")
+        self.assertEqual(mock_log_error.call_args.args[1], "call-invalid")
 
+    @patch.object(handler.LOGGER, "exception")
     @patch("handler.cleanup_resources.run_janitor", side_effect=RuntimeError("internal tenancy detail"))
     @patch("handler.cleanup_resources.load_config", return_value=object())
-    def test_internal_failure_does_not_leak_exception_detail(self, mock_load_config, mock_run_janitor):
+    def test_internal_failure_does_not_leak_exception_detail(
+        self,
+        mock_load_config,
+        mock_run_janitor,
+        mock_log_exception,
+    ):
         result = handler.handler(FunctionContext("call-error"), io.BytesIO(b"{}"))
         self.assertEqual(result["status_code"], 500)
         body = json.loads(result["body"])
         self.assertEqual(body, {"status": "error", "message": "internal error", "request_id": "call-error"})
+        mock_log_exception.assert_called_once_with(
+            "Janitor run failed request_id=%s failure_category=runtime",
+            "call-error",
+        )
 
 
 if __name__ == "__main__":
