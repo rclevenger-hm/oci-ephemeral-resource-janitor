@@ -61,6 +61,13 @@ def _correlated_body(body: Dict[str, Any], request_id: Optional[str]) -> Dict[st
     return {**body, "request_id": request_id}
 
 
+def _event(event: str, request_id: Optional[str], **fields: Any) -> str:
+    payload = {"event": event, **fields}
+    if request_id:
+        payload["request_id"] = request_id
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def _build_response(ctx, body: Dict[str, Any], status_code: int = 200):
     payload = json.dumps(body)
     if response is None:
@@ -83,14 +90,17 @@ def handler(ctx, data: io.BytesIO = None):
         config = cleanup_resources.load_config(payload)
         report = cleanup_resources.run_janitor(config)
         LOGGER.info(
-            "Janitor run completed request_id=%s scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
-            request_id,
-            report["scanned_count"],
-            report["candidate_count"],
-            report["selected_count"],
-            report["action"],
-            report["dry_run"],
-            report["limited"],
+            _event(
+                "janitor.run.completed",
+                request_id,
+                scanned_count=report["scanned_count"],
+                candidate_count=report["candidate_count"],
+                selected_count=report["selected_count"],
+                action=report["action"],
+                dry_run=report["dry_run"],
+                limited=report["limited"],
+                reason_counts=report["reason_counts"],
+            )
         )
         return _build_response(
             ctx,
@@ -111,9 +121,12 @@ def handler(ctx, data: io.BytesIO = None):
         )
     except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         LOGGER.error(
-            "Janitor run failed request_id=%s failure_category=configuration: %s",
-            request_id,
-            exc,
+            _event(
+                "janitor.run.failed",
+                request_id,
+                failure_category="configuration",
+                message=str(exc),
+            )
         )
         return _build_response(
             ctx,
@@ -122,8 +135,11 @@ def handler(ctx, data: io.BytesIO = None):
         )
     except Exception:  # pragma: no cover - exercised in runtime integration
         LOGGER.exception(
-            "Janitor run failed request_id=%s failure_category=runtime",
-            request_id,
+            _event(
+                "janitor.run.failed",
+                request_id,
+                failure_category="runtime",
+            )
         )
         return _build_response(
             ctx,
