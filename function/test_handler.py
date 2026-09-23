@@ -55,16 +55,17 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(body["candidate_count"], 2)
         self.assertEqual(body["reason_counts"]["required_tag_missing"], 8)
         self.assertEqual(body["request_id"], "call-123")
-        mock_log_info.assert_called_once_with(
-            "Janitor run completed request_id=%s scanned=%s eligible=%s selected=%s action=%s dry_run=%s limited=%s",
-            "call-123",
-            10,
-            2,
-            2,
-            "report",
-            True,
-            False,
-        )
+
+        event = json.loads(mock_log_info.call_args.args[0])
+        self.assertEqual(event["event"], "janitor.run.completed")
+        self.assertEqual(event["request_id"], "call-123")
+        self.assertEqual(event["scanned_count"], 10)
+        self.assertEqual(event["candidate_count"], 2)
+        self.assertEqual(event["selected_count"], 2)
+        self.assertEqual(event["action"], "report")
+        self.assertTrue(event["dry_run"])
+        self.assertFalse(event["limited"])
+        self.assertEqual(event["reason_counts"]["required_tag_missing"], 8)
 
     @patch.object(handler.LOGGER, "error")
     def test_client_error_includes_request_id_and_failure_category(self, mock_log_error):
@@ -72,8 +73,12 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(result["status_code"], 400)
         body = json.loads(result["body"])
         self.assertEqual(body["request_id"], "call-invalid")
-        self.assertEqual(mock_log_error.call_args.args[0], "Janitor run failed request_id=%s failure_category=configuration: %s")
-        self.assertEqual(mock_log_error.call_args.args[1], "call-invalid")
+
+        event = json.loads(mock_log_error.call_args.args[0])
+        self.assertEqual(event["event"], "janitor.run.failed")
+        self.assertEqual(event["request_id"], "call-invalid")
+        self.assertEqual(event["failure_category"], "configuration")
+        self.assertIn("JSON object", event["message"])
 
     @patch.object(handler.LOGGER, "exception")
     @patch("handler.cleanup_resources.run_janitor", side_effect=RuntimeError("internal tenancy detail"))
@@ -88,10 +93,14 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(result["status_code"], 500)
         body = json.loads(result["body"])
         self.assertEqual(body, {"status": "error", "message": "internal error", "request_id": "call-error"})
-        mock_log_exception.assert_called_once_with(
-            "Janitor run failed request_id=%s failure_category=runtime",
-            "call-error",
-        )
+
+        event = json.loads(mock_log_exception.call_args.args[0])
+        self.assertEqual(event, {
+            "event": "janitor.run.failed",
+            "failure_category": "runtime",
+            "request_id": "call-error",
+        })
+        self.assertNotIn("internal tenancy detail", mock_log_exception.call_args.args[0])
 
 
 if __name__ == "__main__":
