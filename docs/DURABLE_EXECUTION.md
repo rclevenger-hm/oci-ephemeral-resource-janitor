@@ -130,6 +130,15 @@ update restarts the interval; an unrelated manually stopped instance has no jani
 stop history and is skipped. Existing stopped instances are not automatically
 grandfathered into deletion when upgrading.
 
+Live discovery of a RUNNING instance invalidates its previously confirmed stop
+history, including when the instance is not a candidate for the configured action.
+A subsequent manual stop cannot reuse that history to qualify for termination;
+a new accepted janitor stop and full grace interval are required. This conservative
+invalidation is saved under the scope lock before any action, preserves pending
+intents and budget reservations, and does not infer action completion. Dry-run and
+report-only scans do not alter history. An unobserved restart between scans cannot
+be established from these observations; changed ETags still restart the grace period.
+
 An accepted stop whose outcome has not yet been observed is not repeatedly
 submitted, even if a list/get temporarily still shows RUNNING. A permanently stuck
 stop requires operator investigation. Termination is submitted asynchronously;

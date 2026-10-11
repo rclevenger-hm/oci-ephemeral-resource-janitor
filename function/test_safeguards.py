@@ -349,6 +349,93 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(report["outcomes"][0]["reason"], "termination_grace_period")
         self.assertEqual(len(self.client.calls), 1)
 
+    def test_discovered_restart_invalidates_confirmed_stop_history(self):
+        self.run_cleanup()
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        self.client.instances["one"].lifecycle_state = "RUNNING"
+        self.client.etags["one"] = "restarted"
+        report = self.run_cleanup(action="terminate", allow_terminate=True)
+        self.assertEqual(report["planned_count"], 0)
+        self.assertNotIn("stop", self.objects.state()["resources"]["one"])
+
+        # A later manual stop must not inherit the janitor's previous authority.
+        self.client.instances["one"].lifecycle_state = "STOPPED"
+        self.client.etags["one"] = "manually-stopped"
+        for _ in range(2):
+            self.now += datetime.timedelta(hours=2)
+            report = self.run_cleanup(action="terminate", allow_terminate=True)
+            self.assertEqual(report["outcomes"][0]["reason"], "no_janitor_stop_history")
+        self.assertEqual(len(self.client.calls), 1)
+
+    def test_restart_invalidation_preserves_unresolved_intent_and_budget(self):
+        self.run_cleanup()
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        store = self.store()
+        store.acquire("reconciliation", c.format_timestamp(self.now))
+        state = store.load()
+        state["resources"]["one"]["pending"] = {"action": "terminate", "run_id": "uncertain"}
+        store.save(state)
+        store.release()
+        self.client.instances["one"].lifecycle_state = "RUNNING"
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        self.assertEqual(self.objects.state(), state)
+        self.assertEqual(len(self.client.calls), 1)
+
+    def test_restart_invalidation_preserves_reservations_and_allows_new_stop_cycle(self):
+        self.run_cleanup()
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        self.client.instances["one"].lifecycle_state = "RUNNING"
+        self.client.etags["one"] = "restarted"
+        reservations = copy.deepcopy(self.objects.state()["reservations"])
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        self.assertEqual(self.objects.state()["reservations"], reservations)
+        self.assertEqual(self.run_cleanup()["outcomes"][0]["status"], "submitted")
+        self.assertNotIn("observed_stopped_at", self.objects.state()["resources"]["one"]["stop"])
+        report = self.run_cleanup(action="terminate", allow_terminate=True)
+        self.assertEqual(report["outcomes"][0]["reason"], "termination_grace_period")
+        self.now += datetime.timedelta(hours=1)
+        self.assertEqual(self.run_cleanup(action="terminate", allow_terminate=True)["outcomes"][0]["status"], "submitted")
+        self.assertEqual([call[1] for call in self.client.calls], ["STOP", "STOP", "TERMINATE"])
+
+    def test_preview_restart_does_not_change_durable_history(self):
+        self.run_cleanup()
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        state = self.objects.state()
+        self.client.instances["one"].lifecycle_state = "RUNNING"
+        for overrides in ({"dry_run": True}, {"action": "report"}):
+            with self.subTest(overrides=overrides):
+                self.run_cleanup(**overrides)
+                self.assertEqual(self.objects.state(), state)
+        self.assertEqual(len(self.client.calls), 1)
+
+    def test_restart_invalidation_is_independent_of_action_cap(self):
+        self.client = FakeCompute(instance("a"), instance("b"), instance("z"))
+        self.run_cleanup()
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        self.now += datetime.timedelta(hours=1)
+        self.client.instances["z"].lifecycle_state = "RUNNING"
+        report = self.run_cleanup(action="terminate", allow_terminate=True, max_actions_per_run=1)
+        self.assertEqual(report["selected_count"], 1)
+        self.assertTrue(report["limited"])
+        self.assertNotIn("stop", self.objects.state()["resources"]["z"])
+        self.assertEqual([call[0] for call in self.client.calls], ["a", "b", "z", "a"])
+
+    def test_restart_invalidation_failure_retains_lock_and_prevents_actions(self):
+        self.client = FakeCompute(instance("a"), instance("b"))
+        self.run_cleanup()
+        self.run_cleanup(action="terminate", allow_terminate=True)
+        self.now += datetime.timedelta(hours=2)
+        self.client.instances["a"].lifecycle_state = "RUNNING"
+        state = self.objects.state()
+        self.objects.fail_write = lambda name, value: (
+            name.endswith("/state.json") and "stop" not in value["resources"]["a"]
+        )
+        with self.assertRaises(StateError):
+            self.run_cleanup(action="terminate", allow_terminate=True)
+        self.assertEqual(self.objects.state(), state)
+        self.assertEqual(len(self.client.calls), 2)
+        self.assertTrue(self.objects.locked())
+
     def test_accepted_stop_is_not_repeated_during_eventual_consistency(self):
         self.run_cleanup()
         self.client.instances["one"].lifecycle_state = "RUNNING"
