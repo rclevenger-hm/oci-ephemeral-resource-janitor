@@ -42,6 +42,23 @@ def _budget(state, config, now):
     return len(state["reservations"]) < config.max_actions_per_window
 
 
+def _invalidate_restarted_history(state, decisions):
+    """Discard confirmed stop evidence even when discovery excludes a restart.
+
+    Discovery may conservatively revoke evidence, but cannot establish a stop or
+    clear an unresolved action. Fresh eligibility and ETags still gate mutations.
+    """
+    changed = False
+    for decision in decisions:
+        if decision["lifecycle_state"] != "RUNNING":
+            continue
+        record = state["resources"].get(decision["resource_id"], {})
+        if not record.get("pending") and record.get("stop", {}).get("observed_stopped_at"):
+            record.pop("stop")
+            changed = True
+    return changed
+
+
 def _lifecycle_reason(state, instance, etag, config, now):
     record = state["resources"].setdefault(instance.id, {})
     if record.get("pending"):
@@ -120,6 +137,8 @@ def run_live(client, config, report):
             "expires_at_tag_key": config.expires_at_tag_key,
         }
         _checkpoint(store, config, report)  # Entire plan precedes every mutation.
+        if _invalidate_restarted_history(state, report["decisions"]):
+            store.save(state)
         fatal = False
         for outcome in report["outcomes"]:
             if report["selected_count"] >= config.max_actions_per_run:
